@@ -84,8 +84,8 @@ def process(connection, config, metadata):
     dmtx = None
 
     # read in Pulseq prot
-    # pulseq_filename = "20201111_gre_15intl_rf1_fatsat" # filename from Siemens protocol parameter tFree
-    pulseq_filename = metadata.userParameters.userParameterString[0].value_
+    # pulseq_filename = "20201111_gre_15intl_rf1_fatsat" 
+    pulseq_filename = metadata.userParameters.userParameterString[0].value_ # filename from Siemens protocol parameter tFree
     pulseq_file = debugFolder + "/" + pulseq_filename
     try:
         prot = h5py.File(pulseq_file+'.hdf5', 'r')
