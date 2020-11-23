@@ -1,5 +1,7 @@
 import ismrmrd
 import h5py
+import numpy as np
+import os
 
 """ function to insert protocol into ismrmrd file
 
@@ -8,21 +10,28 @@ Protocol data, which contain a single number (e.g dwelltime) are stored as attri
 protocol data, which contain arrays (e.g. acquisition data) are stored as datasets.
 
 """
-# In Sequenzdatei hdf5-Datei erzeugen, die hdr und acquisitions enthält. Der header kann am Ende gesetzt werden, die Acquisition Parameter (auch Gradienten) müssen während der Sequenzerzeugung gesetzt werden.
 
+# ToDos:
+
+# In Sequenzdatei hdf5-Datei erzeugen, die hdr und acquisitions enthält. Der header kann am Ende gesetzt werden, die Acquisition Parameter (auch Gradienten) müssen während der Sequenzerzeugung gesetzt werden.
 
 # in bart_pulseq Funktion ohne for loop für Akquisitionen und statt dem gesamenten Protokoll nur die jeweilige Akquistion übergeben.
 # Header nur beim ersten mal reinschreiben??
-# ismrmrd durch metadata ersetzen.
+# ismrmrd durch metadata und connection ersetzen.
 
-def insert_prot(prot_file, ismrmrd_file): # später durch args ersetzen, um ein command line tool zu erstellen
+# In bart_pulseq Funktion muss 3. Dimension für BART Reko hinzugefügt werden wenn trajectory_dimensions=2 ist
+# trajektorie muss wieder reshaped werden (np.swapaxes(traj.reshape[samples,dims],0,1)) und orientation muss geändert werden
+
+# später prot_file und ismrmrd_file durch args ersetzen, um ein command line tool zu erstellen
+
+def insert_prot(prot_file, ismrmrd_file): 
 
     #---------------------------
     # Read protocol and Ismrmrd file
     #---------------------------
 
-    prot = h5py.File(prot_file, 'r')
-    dset = ismrmrd.Dataset(ismrmrd_file)
+    prot = h5py.File(prot_file + '.hdf5', 'r')
+    dset = ismrmrd.Dataset(ismrmrd_file + '.h5')
 
     #---------------------------
     # First process the header 
@@ -31,12 +40,31 @@ def insert_prot(prot_file, ismrmrd_file): # später durch args ersetzen, um ein 
     prot_hdr = prot['hdr']
     dset_hdr = ismrmrd.xsd.CreateFromDocument(dset.read_xml_header())
 
-    dset_hdr.encoding[0].encodedSpace.matrixSize.x = prot['hdr']['encoding']['0']['encodedSpace']['matrixSize'].attrs['x']
+    dset_user_prm_dbl = dset_hdr.userParameters.userParameterDouble
+    prot_user_prm_dbl = prot_hdr['userParameters']['userParameterDouble']
+    dset_user_prm_dbl[0].value_ = prot_user_prm_dbl.attrs['dwellTime_us']
+    dset_user_prm_dbl[1].value_ = prot_user_prm_dbl.attrs['traj_delay'] # additional trajectory delay [s]
 
+    dset_enc1 = dset_hdr.encoding[0]
+    prot_enc1 = prot_hdr['encoding']['0']
+    dset_enc1.encodedSpace.matrixSize.x = prot_enc1['encodedSpace']['matrixSize'].attrs['x']
+    dset_enc1.encodedSpace.matrixSize.y = prot_enc1['encodedSpace']['matrixSize'].attrs['y']
+    dset_enc1.encodedSpace.matrixSize.z = prot_enc1['encodedSpace']['matrixSize'].attrs['z']
+    
+    dset_enc1.encodedSpace.fieldOfView_mm.x = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['x']
+    dset_enc1.encodedSpace.fieldOfView_mm.y = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['y']
+    dset_enc1.encodedSpace.fieldOfView_mm.z = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['z']
+    
+    dset_enc1.reconSpace.matrixSize.x = prot_enc1['reconSpace']['matrixSize'].attrs['x']
+    dset_enc1.reconSpace.matrixSize.y = prot_enc1['reconSpace']['matrixSize'].attrs['y']
+    dset_enc1.reconSpace.matrixSize.z = prot_enc1['reconSpace']['matrixSize'].attrs['z']
+    
+    dset_enc1.reconSpace.fieldOfView_mm.x = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['x']
+    dset_enc1.reconSpace.fieldOfView_mm.y = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['y']
+    dset_enc1.reconSpace.fieldOfView_mm.z = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['z']
 
     # write header back to file
     dset.write_xml_header(dset_hdr.toxml())
-
 
     #---------------------------
     # Now process all acquisitions
@@ -46,21 +74,278 @@ def insert_prot(prot_file, ismrmrd_file): # später durch args ersetzen, um ein 
     if not len(prot['acquisitions']) == dset.number_of_acquisitions():
         raise ValueError('Number of acquisitions in protocol and Ismrmrd file is not the same.')
 
-    for n, prot_acq in enumerate(prot['acquisitions']):
+    for n, item in enumerate(prot['acquisitions']):
 
+        prot_acq = prot['acquisitions'][item]
         dset_acq = dset.read_acquisition(n)
+        dset_acq.trajectory_dimensions = prot_acq.attrs['trajectory_dimensions']
 
+        # rotation matrix
+        dset_acq.phase_dir[:] = prot_acq['phase_dir']
+        dset_acq.read_dir[:] = prot_acq['read_dir']
+        dset_acq.slice_dir[:] = prot_acq['slice_dir']
+
+        # flags - WIP: this is not the complete list of flags, if needed flags can be added
+        if prot_acq['flags'].attrs['ACQ_IS_NOISE_MEASUREMENT']:
+            dset_acq.setFlag(ismrmrd.ACQ_IS_NOISE_MEASUREMENT)
+        if prot_acq['flags'].attrs['ACQ_IS_PHASECORR_DATA']:
+            dset_acq.setFlag(ismrmrd.ACQ_IS_PHASECORR_DATA)
+        if prot_acq['flags'].attrs['ACQ_IS_DUMMYSCAN_DATA']:
+            dset_acq.setFlag(ismrmrd.ACQ_IS_DUMMYSCAN_DATA)
+        if prot_acq['flags'].attrs['ACQ_IS_PARALLEL_CALIBRATION']:
+            dset_acq.setFlag(ismrmrd.ACQ_IS_PARALLEL_CALIBRATION)
+        if prot_acq['flags'].attrs['ACQ_LAST_IN_SLICE']:
+            dset_acq.setFlag(ismrmrd.ACQ_LAST_IN_SLICE)
+        if prot_acq['flags'].attrs['ACQ_LAST_IN_REPETITION']:
+            dset_acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION) 
+
+        # encoding counters
+        dset_acq.idx.slice = prot_acq['idx'].attrs['kspace_encode_step_1']
+        dset_acq.idx.slice = prot_acq['idx'].attrs['kspace_encode_step_2']
         dset_acq.idx.slice = prot_acq['idx'].attrs['slice']
-        dset_acq.setFlag()
-        dset_acq.data
-        dset_acq.traj = calc_traj()
+        dset_acq.idx.slice = prot_acq['idx'].attrs['contrast']
+        dset_acq.idx.slice = prot_acq['idx'].attrs['phase']
+        dset_acq.idx.slice = prot_acq['idx'].attrs['average']
+        dset_acq.idx.slice = prot_acq['idx'].attrs['repetition']
+        dset_acq.idx.slice = prot_acq['idx'].attrs['set']
+        dset_acq.idx.slice = prot_acq['idx'].attrs['segment']
+
+        # calculate trajectory with GIRF prediction
+        traj = calc_traj(prot_acq, prot_hdr)
+        dset_acq.traj = np.swapaxes(traj,0,1).flatten() # format [kx,ky,kx,ky,...] or [kx,ky,kz,kx,ky,kz,...]
 
         dset.write_acquisition(dset_acq, n)
 
     dset.close()
     prot.close()
 
-def calc_traj(grads, adc):
+def calc_traj(acq, hdr):
     """ Calculates the kspace trajectory from any gradient using Girf prediction and interpolates it on the adc raster
+
+        acq: acquisition from hdf5 protocol file
+        hdr: header from hdf5 protocol file
     """
-    pass
+
+    dt_grad = 10e-6 # [s]
+    dt_skope = 1e-6 # [s]
+    gammabar = 42.577e6
+
+    grad = acq['gradients'][:] # [T/m]
+    dims = grad.shape[0]
+    ncol = grad.shape[1]
+    if acq.attrs['trajectory_dimensions'] != dims:
+        print('Warning: Ismrmrd parameter trajectory_dimensions differs from gradient array dimensions.')
+
+    fov = hdr['enoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
+    rotmat = calc_rotmat(acq)
+    dwelltime = hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
+    gradshift = hdr['userParameters']['userParameterDouble'].attrs['traj_delay']
+
+    # ADC sampling time
+    adctime = dwelltime * np.arange(0.5, ncol)
+
+    # add zeros around gradient
+    grad = np.concatenate((np.zeros([dims,1]), grad, np.zeros([dims,1])), axis=1)
+    gradshift -= dt_grad
+
+    # add z-dir for prediction if necessary
+    if dims == 2:
+        grad = np.concatenate((grad, np.zeros([1, grad.shape[1]])), axis=0)
+
+    ##############################
+    ## girf trajectory prediction:
+    ##############################
+
+    filepath = os.path.dirname(os.path.abspath(__file__))
+    girf = np.load(filepath + "/girf/girf_10us.npy")
+
+    # rotation to phys coord system
+    pred_grad = gcs_to_dcs(grad, rotmat)
+
+    # gradient prediction
+    pred_grad = grad_pred(pred_grad, girf) 
+
+    # rotate back to logical system
+    pred_grad = dcs_to_gcs(pred_grad, rotmat)
+
+    # time vector for interpolation
+    gradtime = dt_grad * np.arange(pred_grad.shape[-1]) + gradshift
+
+    # calculate trajectory 
+    pred_trj = np.cumsum(pred_grad.real, axis=1)
+    gradtime += dt_grad/2 # account for cumsum
+
+    # proper scaling - WIP: use BART scaling, is this also the Ismrmrd scaling???
+    pred_trj *= dt_grad * gammabar * (1e-3 * fov)
+
+    # interpolate trajectory to scanner dwelltime
+    pred_trj = intp_axis(adctime, gradtime, pred_trj, axis=1)
+    
+    if dims == 2:
+        return pred_trj[:2]
+    else:
+        return pred_trj
+
+def grad_pred(grad, girf):
+    """
+    gradient prediction with girf
+    
+    Parameters:
+    ------------
+    grad: nominal gradient [dims, samples]
+    girf: gradient impulse response function [input dims, output dims (incl k0), samples]
+    """
+    ndim = grad.shape[0]
+    grad_sampl = grad.shape[-1]
+    girf_sampl = girf.shape[-1]
+
+    # remove k0 from girf:
+    girf = girf[:,1:]
+
+    # zero-fill grad to number of girf samples (add check?)
+    grad = np.concatenate([grad.copy(), np.zeros([ndim, girf_sampl-grad_sampl])], axis=-1)
+
+    # FFT
+    grad = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(grad, axes=-1), axis=-1), axes=-1)
+    print('girf.shape =%s, grad.shape = %s'%(girf.shape, grad.shape))
+
+    # apply girf to nominal gradients
+    pred_grad = np.zeros_like(grad)
+    for dim in range(ndim):
+        pred_grad[dim]=np.sum(grad*girf[np.newaxis,:ndim,dim,:], axis=1)
+
+    # IFFT
+    pred_grad = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(pred_grad, axes=-1), axis=-1), axes=-1)
+    
+    # cut out relevant part
+    pred_grad = pred_grad[:,:grad_sampl]
+
+    return pred_grad
+
+def calc_rotmat(acq):
+    phase_dir = acq['phase_dir']
+    read_dir = acq['read_dir']
+    slice_dir = acq['slice_dir']
+    return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
+
+def intp_axis(newgrid, oldgrid, data, axis=0):
+    # interpolation along an axis (shape of newgrid, oldgrid and data see np.interp)
+    tmp = np.moveaxis(data.copy(), axis, 0)
+    newshape = (len(newgrid),) + tmp.shape[1:]
+    tmp = tmp.reshape((len(oldgrid), -1))
+    n_elem = tmp.shape[-1]
+    intp_data = np.zeros((len(newgrid), n_elem), dtype=data.dtype)
+    for k in range(n_elem):
+        intp_data[:, k] = np.interp(newgrid, oldgrid, tmp[:, k])
+    intp_data = intp_data.reshape(newshape)
+    intp_data = np.moveaxis(intp_data, 0, axis)
+    return intp_data
+
+def pcs_to_dcs(grads, patient_position='HFS'):
+    """ Convert from patient coordinate system (PCS, physical) 
+        to device coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    """
+    grads = grads.copy()
+
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    if patient_position.upper() == 'HFS':
+        grads[:,1] *= -1
+        grads[:,2] *= -1
+    else:
+        raise ValueError
+
+    return grads
+
+def pcs_to_dcs(grads, patient_position='HFS'):
+    """ Convert from patient coordinate system (PCS, physical) 
+        to device coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    """
+    grads = grads.copy()
+
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    if patient_position.upper() == 'HFS':
+        grads[:,1] *= -1
+        grads[:,2] *= -1
+    else:
+        raise ValueError
+
+    return grads
+
+def dcs_to_pcs(grads, patient_position='HFS'):
+    """ Convert from device coordinate system (DCS, physical) 
+        to patient coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    """
+    return pcs_to_dcs(grads, patient_position) # same sign switch
+    
+def gcs_to_pcs(grads, rotmat):
+    """ Convert from gradient coordinate system (GCS, logical) 
+        to patient coordinate system (DCS, physical)
+    """
+    return np.matmul(rotmat, grads)
+
+def pcs_to_gcs(grads, rotmat):
+    """ Convert from patient coordinate system (PCS, physical) 
+        to gradient coordinate system (GCS, logical) 
+    """
+    return np.matmul(np.linalg.inv(rotmat), grads)
+
+def gcs_to_dcs(grads, rotmat):
+    """ Convert from gradient coordinate system (GCS, logical) 
+        to device coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    Parameters
+    ----------
+    grads : numpy array [3, intl, samples]
+            gradient to be converted
+    rotmat: numpy array [3,3]
+            rotation matrix from quaternion from Siemens Raw Data header
+    Returns
+    -------
+    grads_cv : numpy.ndarray
+               Converted gradient
+    """
+    grads = grads.copy()
+
+    # rotation from GCS (PHASE,READ,SLICE) to patient coordinate system (PCS)
+    grads = gcs_to_pcs(grads, rotmat)
+    
+    # PCS (SAG,COR,TRA) to DCS (X,Y,Z)
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    grads = pcs_to_dcs(grads)
+    
+    return grads
+
+
+def dcs_to_gcs(grads, rotmat):
+    """ Convert from device coordinate system (DCS, logical) 
+        to gradient coordinate system (GCS, physical)
+        this is valid for patient orientation head first/supine
+    Parameters
+    ----------
+    grads : numpy array [3, intl, samples]
+            gradient to be converted
+    rotmat: numpy array [3,3]
+            rotation matrix from quaternion from Siemens Raw Data header
+    Returns
+    -------
+    grads_cv : numpy.ndarray
+               Converted gradient
+    """
+    grads = grads.copy()
+    
+    # DCS (X,Y,Z) to PCS (SAG,COR,TRA)
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    grads = dcs_to_pcs(grads)
+    
+    # PCS (SAG,COR,TRA) to GCS (PHASE,READ,SLICE)
+    grads = pcs_to_gcs(grads, rotmat)
+    
+    return grads
+
+protfile = "/home/veldmannm/Software/fire_setup/example_data/20201123_fire_test_fatsat"
+ismrmrd_file = "/home/veldmannm/Software/fire_setup/example_data/test"
+
+insert_prot(protfile, ismrmrd_file)
