@@ -2,6 +2,7 @@ import ismrmrd
 import h5py
 import numpy as np
 import os
+import argparse
 
 """ function to insert protocol into ismrmrd file
 
@@ -22,16 +23,16 @@ protocol data, which contain arrays (e.g. acquisition data) are stored as datase
 # In bart_pulseq Funktion muss 3. Dimension für BART Reko hinzugefügt werden wenn trajectory_dimensions=2 ist
 # trajektorie muss wieder reshaped werden (np.swapaxes(traj.reshape[samples,dims],0,1)) und orientation muss geändert werden
 
-# später prot_file und ismrmrd_file durch args ersetzen, um ein command line tool zu erstellen
+# später prot_file und data_file durch args ersetzen, um ein command line tool zu erstellen
 
-def insert_prot(prot_file, ismrmrd_file): 
+def insert_prot(prot_file, data_file): 
 
     #---------------------------
     # Read protocol and Ismrmrd file
     #---------------------------
 
-    prot = h5py.File(prot_file + '.hdf5', 'r')
-    dset = ismrmrd.Dataset(ismrmrd_file + '.h5')
+    prot = h5py.File(prot_file, 'r')
+    dset = ismrmrd.Dataset(data_file)
 
     #---------------------------
     # First process the header 
@@ -78,7 +79,7 @@ def insert_prot(prot_file, ismrmrd_file):
 
         prot_acq = prot['acquisitions'][item]
         dset_acq = dset.read_acquisition(n)
-        dset_acq.trajectory_dimensions = prot_acq.attrs['trajectory_dimensions']
+        dset_acq.resize(trajectory_dimensions = prot_acq.attrs['trajectory_dimensions'], number_of_samples=dset_acq.number_of_samples, active_channels=dset_acq.active_channels)
 
         # rotation matrix
         dset_acq.phase_dir[:] = prot_acq['phase_dir']
@@ -111,15 +112,15 @@ def insert_prot(prot_file, ismrmrd_file):
         dset_acq.idx.slice = prot_acq['idx'].attrs['segment']
 
         # calculate trajectory with GIRF prediction
-        traj = calc_traj(prot_acq, prot_hdr)
-        dset_acq.traj = np.swapaxes(traj,0,1).flatten() # format [kx,ky,kx,ky,...] or [kx,ky,kz,kx,ky,kz,...]
+        traj = calc_traj(prot_acq, prot_hdr, dset_acq.number_of_samples)
+        dset_acq.traj[:] = np.swapaxes(traj,0,1) # [dims, samples]
 
         dset.write_acquisition(dset_acq, n)
 
     dset.close()
     prot.close()
 
-def calc_traj(acq, hdr):
+def calc_traj(acq, hdr, ncol):
     """ Calculates the kspace trajectory from any gradient using Girf prediction and interpolates it on the adc raster
 
         acq: acquisition from hdf5 protocol file
@@ -132,13 +133,12 @@ def calc_traj(acq, hdr):
 
     grad = acq['gradients'][:] # [T/m]
     dims = grad.shape[0]
-    ncol = grad.shape[1]
     if acq.attrs['trajectory_dimensions'] != dims:
         print('Warning: Ismrmrd parameter trajectory_dimensions differs from gradient array dimensions.')
 
-    fov = hdr['enoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
+    fov = hdr['encoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
     rotmat = calc_rotmat(acq)
-    dwelltime = hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
+    dwelltime = 1e-6 * hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
     gradshift = hdr['userParameters']['userParameterDouble'].attrs['traj_delay']
 
     # ADC sampling time
@@ -207,7 +207,6 @@ def grad_pred(grad, girf):
 
     # FFT
     grad = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(grad, axes=-1), axis=-1), axes=-1)
-    print('girf.shape =%s, grad.shape = %s'%(girf.shape, grad.shape))
 
     # apply girf to nominal gradients
     pred_grad = np.zeros_like(grad)
@@ -223,9 +222,9 @@ def grad_pred(grad, girf):
     return pred_grad
 
 def calc_rotmat(acq):
-    phase_dir = acq['phase_dir']
-    read_dir = acq['read_dir']
-    slice_dir = acq['slice_dir']
+    phase_dir = acq['phase_dir'][:]
+    read_dir = acq['read_dir'][:]
+    slice_dir = acq['slice_dir'][:]
     return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
 
 def intp_axis(newgrid, oldgrid, data, axis=0):
@@ -345,7 +344,28 @@ def dcs_to_gcs(grads, rotmat):
     
     return grads
 
-protfile = "/home/veldmannm/Software/fire_setup/example_data/20201123_fire_test_fatsat"
-ismrmrd_file = "/home/veldmannm/Software/fire_setup/example_data/test"
+class HDF5File(argparse.FileType):
+    def __call__(self, string):
+        _, ext = os.path.splitext(string)
 
-insert_prot(protfile, ismrmrd_file)
+        if ext == '':
+            string = string + '.h5'  # .h5 is default file extension
+        else:
+            if (str.lower(ext) != '.h5' and str.lower(ext) != '.hdf5'):
+                parser.error('hdf5 file %s should have a .h5 extension' % (string))
+
+        returnFile = super(HDF5File, self).__call__(string)
+        returnFile.close()
+        returnFile = os.path.abspath(returnFile.name)
+        return returnFile
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="compresses and decompresses Siemens raw data files (.dat)")
+       
+    parser.add_argument('-p', '--prot_file', type=HDF5File('r'),
+                            help='Protocol (HDF5) file', required=True)
+    parser.add_argument('-d', '--data_file', type=HDF5File('r+'),
+                            help='Data file (ISMRMRD)', required=True)
+    args = parser.parse_args()
+
+    insert_prot(args.prot_file, args.data_file)
