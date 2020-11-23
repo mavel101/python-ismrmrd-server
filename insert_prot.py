@@ -1,5 +1,5 @@
 import ismrmrd
-import h5py
+import h5py # WIP: remove this and replace protocol by Ismrmrd Protocol
 import numpy as np
 import os
 import argparse
@@ -14,16 +14,9 @@ protocol data, which contain arrays (e.g. acquisition data) are stored as datase
 
 # ToDos:
 
-# In Sequenzdatei hdf5-Datei erzeugen, die hdr und acquisitions enthält. Der header kann am Ende gesetzt werden, die Acquisition Parameter (auch Gradienten) müssen während der Sequenzerzeugung gesetzt werden.
-
-# in bart_pulseq Funktion ohne for loop für Akquisitionen und statt dem gesamenten Protokoll nur die jeweilige Akquistion übergeben.
-# Header nur beim ersten mal reinschreiben??
-# ismrmrd durch metadata und connection ersetzen.
-
-# In bart_pulseq Funktion muss 3. Dimension für BART Reko hinzugefügt werden wenn trajectory_dimensions=2 ist
-# trajektorie muss wieder reshaped werden (np.swapaxes(traj.reshape[samples,dims],0,1)) und orientation muss geändert werden
-
-# später prot_file und data_file durch args ersetzen, um ein command line tool zu erstellen
+# Protokoll als Ismrmrd Datei erzeugen statt hdf5 - danach h5py hier und in bart_pulseq_new.py löschen
+# hdr=ismrmrd.Meta() kann als dict verwendet werden, dann hdr.serialize() -> zu xml
+# acqs=ismrmrd.Acquisition() -> dann write_acquistion oder append_acquisition?
 
 def insert_prot(prot_file, data_file): 
 
@@ -75,9 +68,9 @@ def insert_prot(prot_file, data_file):
     if not len(prot['acquisitions']) == dset.number_of_acquisitions():
         raise ValueError('Number of acquisitions in protocol and Ismrmrd file is not the same.')
 
-    for n, item in enumerate(prot['acquisitions']):
+    for n, _ in enumerate(prot['acquisitions']):
 
-        prot_acq = prot['acquisitions'][item]
+        prot_acq = prot['acquisitions']['%d' % n]
         dset_acq = dset.read_acquisition(n)
         dset_acq.resize(trajectory_dimensions = prot_acq.attrs['trajectory_dimensions'], number_of_samples=dset_acq.number_of_samples, active_channels=dset_acq.active_channels)
 
@@ -87,6 +80,7 @@ def insert_prot(prot_file, data_file):
         dset_acq.slice_dir[:] = prot_acq['slice_dir']
 
         # flags - WIP: this is not the complete list of flags, if needed flags can be added
+        dset_acq.clearAllFlags()
         if prot_acq['flags'].attrs['ACQ_IS_NOISE_MEASUREMENT']:
             dset_acq.setFlag(ismrmrd.ACQ_IS_NOISE_MEASUREMENT)
         if prot_acq['flags'].attrs['ACQ_IS_PHASECORR_DATA']:
@@ -98,18 +92,18 @@ def insert_prot(prot_file, data_file):
         if prot_acq['flags'].attrs['ACQ_LAST_IN_SLICE']:
             dset_acq.setFlag(ismrmrd.ACQ_LAST_IN_SLICE)
         if prot_acq['flags'].attrs['ACQ_LAST_IN_REPETITION']:
-            dset_acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION) 
+            dset_acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION)
 
         # encoding counters
-        dset_acq.idx.slice = prot_acq['idx'].attrs['kspace_encode_step_1']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['kspace_encode_step_2']
+        dset_acq.idx.kspace_encode_step_1 = prot_acq['idx'].attrs['kspace_encode_step_1']
+        dset_acq.idx.kspace_encode_step_2 = prot_acq['idx'].attrs['kspace_encode_step_2']
         dset_acq.idx.slice = prot_acq['idx'].attrs['slice']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['contrast']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['phase']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['average']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['repetition']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['set']
-        dset_acq.idx.slice = prot_acq['idx'].attrs['segment']
+        dset_acq.idx.contrast = prot_acq['idx'].attrs['contrast']
+        dset_acq.idx.phase = prot_acq['idx'].attrs['phase']
+        dset_acq.idx.average = prot_acq['idx'].attrs['average']
+        dset_acq.idx.repetition = prot_acq['idx'].attrs['repetition']
+        dset_acq.idx.set = prot_acq['idx'].attrs['set']
+        dset_acq.idx.segment = prot_acq['idx'].attrs['segment']
 
         # calculate trajectory with GIRF prediction
         traj = calc_traj(prot_acq, prot_hdr, dset_acq.number_of_samples)
@@ -126,6 +120,12 @@ def calc_traj(acq, hdr, ncol):
         acq: acquisition from hdf5 protocol file
         hdr: header from hdf5 protocol file
     """
+
+    def calc_rotmat(acq):
+        phase_dir = acq['phase_dir'][:]
+        read_dir = acq['read_dir'][:]
+        slice_dir = acq['slice_dir'][:]
+        return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
 
     dt_grad = 10e-6 # [s]
     dt_skope = 1e-6 # [s]
@@ -220,12 +220,6 @@ def grad_pred(grad, girf):
     pred_grad = pred_grad[:,:grad_sampl]
 
     return pred_grad
-
-def calc_rotmat(acq):
-    phase_dir = acq['phase_dir'][:]
-    read_dir = acq['read_dir'][:]
-    slice_dir = acq['slice_dir'][:]
-    return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
 
 def intp_axis(newgrid, oldgrid, data, axis=0):
     # interpolation along an axis (shape of newgrid, oldgrid and data see np.interp)
@@ -362,9 +356,9 @@ class HDF5File(argparse.FileType):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="compresses and decompresses Siemens raw data files (.dat)")
        
-    parser.add_argument('-p', '--prot_file', type=HDF5File('r'),
+    parser.add_argument('-p', '--prot_file', type=HDF5File(),
                             help='Protocol (HDF5) file', required=True)
-    parser.add_argument('-d', '--data_file', type=HDF5File('r+'),
+    parser.add_argument('-d', '--data_file', type=HDF5File(),
                             help='Data file (ISMRMRD)', required=True)
     args = parser.parse_args()
 

@@ -1,12 +1,12 @@
 
 import ismrmrd
+import h5py # WIP: remove this and replace protocol by Ismrmrd Protocol
 import os
 import itertools
 import logging
 import numpy as np
 import numpy.fft as fft
 import base64
-import h5py
 
 from bart import bart
 import spiraltraj
@@ -61,17 +61,149 @@ def apply_prewhitening(data, dmtx):
     return np.asarray(np.asmatrix(dmtx)*np.asmatrix(data.reshape(data.shape[0],data.size//data.shape[0]))).reshape(s)
     
 
+def insert_hdr(prot_file, metadata): 
 
-# Folder for debug output files
+    #---------------------------
+    # Read protocol
+    #---------------------------
+
+    try:
+        prot = h5py.File(prot_file+'.hdf5', 'r')
+    except:
+        try:
+            prot = h5py.File(prot_file+'.h5', 'r')
+        except:
+            print('Pulseq protocol file not found.')
+
+    prot_hdr = prot['hdr']
+
+    #---------------------------
+    # Process the header 
+    #---------------------------
+
+    prot_hdr = prot['hdr']
+
+    dset_user_prm_dbl = metadata.userParameters.userParameterDouble
+    prot_user_prm_dbl = prot_hdr['userParameters']['userParameterDouble']
+    dset_user_prm_dbl[0].value_ = prot_user_prm_dbl.attrs['dwellTime_us']
+    dset_user_prm_dbl[1].value_ = prot_user_prm_dbl.attrs['traj_delay'] # additional trajectory delay [s]
+
+    dset_enc1 = metadata.encoding[0]
+    prot_enc1 = prot_hdr['encoding']['0']
+    dset_enc1.encodedSpace.matrixSize.x = prot_enc1['encodedSpace']['matrixSize'].attrs['x']
+    dset_enc1.encodedSpace.matrixSize.y = prot_enc1['encodedSpace']['matrixSize'].attrs['y']
+    dset_enc1.encodedSpace.matrixSize.z = prot_enc1['encodedSpace']['matrixSize'].attrs['z']
+    
+    dset_enc1.encodedSpace.fieldOfView_mm.x = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['x']
+    dset_enc1.encodedSpace.fieldOfView_mm.y = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['y']
+    dset_enc1.encodedSpace.fieldOfView_mm.z = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['z']
+    
+    dset_enc1.reconSpace.matrixSize.x = prot_enc1['reconSpace']['matrixSize'].attrs['x']
+    dset_enc1.reconSpace.matrixSize.y = prot_enc1['reconSpace']['matrixSize'].attrs['y']
+    dset_enc1.reconSpace.matrixSize.z = prot_enc1['reconSpace']['matrixSize'].attrs['z']
+    
+    dset_enc1.reconSpace.fieldOfView_mm.x = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['x']
+    dset_enc1.reconSpace.fieldOfView_mm.y = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['y']
+    dset_enc1.reconSpace.fieldOfView_mm.z = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['z']
+
+    prot.close()
+
+def insert_acq(prot_file, acq, acq_ctr):
+
+    #---------------------------
+    # Read protocol
+    #---------------------------
+
+    try:
+        prot = h5py.File(prot_file+'.hdf5', 'r')
+    except:
+        try:
+            prot = h5py.File(prot_file+'.h5', 'r')
+        except:
+            print('Pulseq protocol file not found.')
+
+    prot_hdr = prot['hdr']
+
+    #---------------------------
+    # Process all acquisitions
+    #---------------------------
+
+    prot_acq = prot['acquisitions']['%d' % acq_ctr]
+    acq.resize(trajectory_dimensions = prot_acq.attrs['trajectory_dimensions'], number_of_samples=acq.number_of_samples, active_channels=acq.active_channels)
+
+    # rotation matrix
+    acq.phase_dir[:] = prot_acq['phase_dir']
+    acq.read_dir[:] = prot_acq['read_dir']
+    acq.slice_dir[:] = prot_acq['slice_dir']
+
+    # flags - WIP: this is not the complete list of flags, if needed flags can be added
+    acq.clearAllFlags()
+    if prot_acq['flags'].attrs['ACQ_IS_NOISE_MEASUREMENT']:
+        acq.setFlag(ismrmrd.ACQ_IS_NOISE_MEASUREMENT)
+    if prot_acq['flags'].attrs['ACQ_IS_PHASECORR_DATA']:
+        acq.setFlag(ismrmrd.ACQ_IS_PHASECORR_DATA)
+    if prot_acq['flags'].attrs['ACQ_IS_DUMMYSCAN_DATA']:
+        acq.setFlag(ismrmrd.ACQ_IS_DUMMYSCAN_DATA)
+    if prot_acq['flags'].attrs['ACQ_IS_PARALLEL_CALIBRATION']:
+        acq.setFlag(ismrmrd.ACQ_IS_PARALLEL_CALIBRATION)
+    if prot_acq['flags'].attrs['ACQ_LAST_IN_SLICE']:
+        acq.setFlag(ismrmrd.ACQ_LAST_IN_SLICE)
+    if prot_acq['flags'].attrs['ACQ_LAST_IN_REPETITION']:
+        acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION) 
+
+    # encoding counters
+    acq.idx.kspace_encode_step_1 = prot_acq['idx'].attrs['kspace_encode_step_1']
+    acq.idx.kspace_encode_step_2 = prot_acq['idx'].attrs['kspace_encode_step_2']
+    acq.idx.slice = prot_acq['idx'].attrs['slice']
+    acq.idx.contrast = prot_acq['idx'].attrs['contrast']
+    acq.idx.phase = prot_acq['idx'].attrs['phase']
+    acq.idx.average = prot_acq['idx'].attrs['average']
+    acq.idx.repetition = prot_acq['idx'].attrs['repetition']
+    acq.idx.set = prot_acq['idx'].attrs['set']
+    acq.idx.segment = prot_acq['idx'].attrs['segment']
+
+    # calculate trajectory with GIRF prediction
+    traj = calc_traj(prot_acq, prot_hdr, acq.number_of_samples)
+    acq.traj[:] = np.swapaxes(traj,0,1) # [dims, samples]
+
+    prot.close()
+
+# Folder for debug output files and protocol
 debugFolder = "/tmp/share/debug"
 
 def process(connection, config, metadata):
-    logging.info("Config: \n%s", config)
 
     # Create folder, if necessary
     if not os.path.exists(debugFolder):
         os.makedirs(debugFolder)
         logging.debug("Created folder " + debugFolder + " for debug output files")
+
+    #prot_filename = metadata.userParameters.userParameterString[0].value_ # protocol filename from Siemens protocol parameter tFree
+    prot_filename = 'fire_test_pulseq_prot'
+    prot_file = debugFolder + "/" + prot_filename
+
+    insert_hdr(prot_file, metadata)
+    logging.info("Config: \n%s", config)
+
+    # Metadata should be MRD formatted header, but may be a string
+    # if it failed conversion earlier
+
+    try:
+        # logging.info("Metadata: \n%s", metadata.toxml('utf-8'))
+        # logging.info("Metadata: \n%s", metadata.serialize())
+
+        logging.info("Incoming dataset contains %d encodings", len(metadata.encoding))
+        logging.info("First encoding is of type '%s', with a field of view of (%s x %s x %s)mm^3 and a matrix size of (%s x %s x %s)", 
+            metadata.encoding[0].trajectory, 
+            metadata.encoding[0].encodedSpace.matrixSize.x, 
+            metadata.encoding[0].encodedSpace.matrixSize.y, 
+            metadata.encoding[0].encodedSpace.matrixSize.z, 
+            metadata.encoding[0].encodedSpace.fieldOfView_mm.x, 
+            metadata.encoding[0].encodedSpace.fieldOfView_mm.y, 
+            metadata.encoding[0].encodedSpace.fieldOfView_mm.z)
+
+    except:
+        logging.info("Improperly formatted metadata: \n%s", metadata)
 
     # Continuously parse incoming data parsed from MRD messages
     acqGroup = []
@@ -83,68 +215,53 @@ def process(connection, config, metadata):
     sensmaps = [None] * 256
     dmtx = None
 
-    # read in Pulseq prot
-    # pulseq_filename = "20201111_gre_15intl_rf1_fatsat" 
-    pulseq_filename = metadata.userParameters.userParameterString[0].value_ # filename from Siemens protocol parameter tFree
-    pulseq_file = debugFolder + "/" + pulseq_filename
     try:
-        prot = h5py.File(pulseq_file+'.hdf5', 'r')
-    except:
-        try:
-            prot = h5py.File(pulseq_file+'.h5', 'r')
-        except:
-            print('Pulseq protocol file not found.')
-    
-    seq_type = prot['Sequence'].attrs['seq_type']
-    nintl = prot['Gradients'].attrs['Nintl']
-    avgs = prot['Sequence'].attrs['averages']
+        for acq_ctr, item in enumerate(connection):
 
-    try:
-        for k,item in enumerate(connection):
+            insert_acq(prot_file, item, acq_ctr)
+
             # ----------------------------------------------------------
             # Raw k-space data messages
             # ----------------------------------------------------------
             if isinstance(item, ismrmrd.Acquisition):
-                ################
-                # WIP: separate refscan and noise data (when they are provided by the sequence)
-                ################
 
                 # wip: run noise decorrelation
-                # if item.is_flag_set(ismrmrd.ACQ_IS_NOISE_MEASUREMENT):
-                #     noiseGroup.append(item)
-                #     continue
-                # elif len(noiseGroup) > 0 and dmtx is None:
-                #     noise_data = []
-                #     for acq in noiseGroup:
-                #         noise_data.append(acq.data)
-                #     noise_data = np.concatenate(noise_data, axis=1)
-                #     # calculate pre-whitening matrix
-                #     dmtx = calculate_prewhitening(noise_data)
-                #     del(noise_data)
-                
-                if k<prot['Gradients'].attrs['sync_scans']:
+                if item.is_flag_set(ismrmrd.ACQ_IS_NOISE_MEASUREMENT):
+                    noiseGroup.append(item)
                     continue
+                elif len(noiseGroup) > 0 and dmtx is None:
+                    noise_data = []
+                    for acq in noiseGroup:
+                        noise_data.append(acq.data)
+                    noise_data = np.concatenate(noise_data, axis=1)
+                    # calculate pre-whitening matrix
+                    dmtx = calculate_prewhitening(noise_data)
+                    del(noise_data)
+                
+                
+                # Accumulate all imaging readouts in a group
+                if item.is_flag_set(ismrmrd.ACQ_IS_PHASECORR_DATA):
+                    continue
+                elif item.is_flag_set(ismrmrd.ACQ_IS_DUMMYSCAN_DATA): # skope sync scans
+                    continue
+                elif item.is_flag_set(ismrmrd.ACQ_IS_PARALLEL_CALIBRATION):
+                    acsGroup[item.idx.slice].append(item)
+                    continue
+                elif sensmaps[item.idx.slice] is None:
+                    # run parallel imaging calibration (after last calibration scan is acquired/before first imaging scan)
+                    sensmaps[item.idx.slice] = process_acs(acsGroup[item.idx.slice], config, metadata, dmtx)
 
-                # Put here sens calibration scans, sth. like:
-                # elif k<prot['Misc']['calibration_scans']:
-                #   acsGroup[slice_ctr].append(item)
-                #elif sensmaps[slice_ctr] is None:
-                #     run parallel imaging calibration (after last calibration scan is acquired/before first imaging scan)
-                #    sensmaps[slice_ctr] = process_acs(acsGroup[slice_ctr], config, prot, dmtx)
 
                 acqGroup.append(item)
 
                 # When this criteria is met, run process_raw() on the accumulated
                 # data, which returns images that are sent back to the client.
-                if seq_type=='gre':
-                    if k%(nintl*avgs)==nintl*avgs-1:
-                        logging.info("Processing a group of k-space data")
-                        images = process_raw(acqGroup, config, prot, dmtx, sensmaps=None) # WIP: implement sensmaps
-                        logging.debug("Sending images to client:\n%s", images)
-                        connection.send_image(images)
-                        acqGroup = []
-                if seq_type=='diffusion':
-                    pass #WIP
+                if item.is_flag_set(ismrmrd.ACQ_LAST_IN_SLICE) or item.is_flag_set(ismrmrd.ACQ_LAST_IN_REPETITION):
+                    logging.info("Processing a group of k-space data")
+                    images = process_raw(acqGroup, config, metadata, dmtx, sensmaps[item.idx.slice])
+                    logging.debug("Sending images to client:\n%s", images)
+                    connection.send_image(images)
+                    acqGroup = []
 
             # ----------------------------------------------------------
             # Image data messages
@@ -174,73 +291,86 @@ def process(connection, config, metadata):
             ecgData = [item.data for item in waveformGroup if item.waveform_id == 0]
             ecgData = np.concatenate(ecgData,1)
 
+        # Process any remaining groups of raw or image data.  This can 
+        # happen if the trigger condition for these groups are not met.
+        # This is also a fallback for handling image data, as the last
+        # image in a series is typically not separately flagged.
+        if len(acqGroup) > 0:
+            logging.info("Processing a group of k-space data (untriggered)")
+            if sensmaps[item.idx.slice] is None:
+                # run parallel imaging calibration
+                sensmaps[item.idx.slice] = process_acs(acsGroup[item.idx.slice], config, metadata, dmtx) 
+            image = process_raw(acqGroup, config, metadata, dmtx, sensmaps[item.idx.slice])
+            logging.debug("Sending image to client:\n%s", image)
+            connection.send_image(image)
+            acqGroup = []
+
     finally:
-        prot.close()
         connection.send_close()
 
-# WIP: this is only for refscan
-# def sort_into_kspace(group, metadata, dmtx=None, zf_around_center=False):
-#     # initialize k-space
-#     nc = metadata.acquisitionSystemInformation.receiverChannels
 
-#     enc1_min, enc1_max = int(999), int(0)
-#     enc2_min, enc2_max = int(999), int(0)
-#     for acq in group:
-#         enc1 = acq.idx.kspace_encode_step_1
-#         enc2 = acq.idx.kspace_encode_step_2
-#         if enc1 < enc1_min:
-#             enc1_min = enc1
-#         if enc1 > enc1_max:
-#             enc1_max = enc1
-#         if enc2 < enc2_min:
-#             enc2_min = enc2
-#         if enc2 > enc2_max:
-#             enc2_max = enc2
+def sort_into_kspace(group, metadata, dmtx=None, zf_around_center=False):
+    # initialize k-space
+    nc = metadata.acquisitionSystemInformation.receiverChannels
 
-#     nx = 2 * metadata.encoding[0].encodedSpace.matrixSize.x
-#     ny = metadata.encoding[0].encodedSpace.matrixSize.x
-#     # ny = metadata.encoding[0].encodedSpace.matrixSize.y
-#     nz = metadata.encoding[0].encodedSpace.matrixSize.z
+    enc1_min, enc1_max = int(999), int(0)
+    enc2_min, enc2_max = int(999), int(0)
+    for acq in group:
+        enc1 = acq.idx.kspace_encode_step_1
+        enc2 = acq.idx.kspace_encode_step_2
+        if enc1 < enc1_min:
+            enc1_min = enc1
+        if enc1 > enc1_max:
+            enc1_max = enc1
+        if enc2 < enc2_min:
+            enc2_min = enc2
+        if enc2 > enc2_max:
+            enc2_max = enc2
 
-#     kspace = np.zeros([ny, nz, nc, nx], dtype=group[0].data.dtype)
-#     counter = np.zeros([ny, nz], dtype=np.uint16)
+    nx = 2 * metadata.encoding[0].encodedSpace.matrixSize.x
+    ny = metadata.encoding[0].encodedSpace.matrixSize.x
+    # ny = metadata.encoding[0].encodedSpace.matrixSize.y
+    nz = metadata.encoding[0].encodedSpace.matrixSize.z
 
-#     logging.debug("nx/ny/nz: %s/%s/%s; enc1 min/max: %s/%s; enc2 min/max:%s/%s, ncol: %s" % (nx, ny, nz, enc1_min, enc1_max, enc2_min, enc2_max, group[0].data.shape[-1]))
+    kspace = np.zeros([ny, nz, nc, nx], dtype=group[0].data.dtype)
+    counter = np.zeros([ny, nz], dtype=np.uint16)
 
-#     for acq in group:
-#         enc1 = acq.idx.kspace_encode_step_1
-#         enc2 = acq.idx.kspace_encode_step_2
+    logging.debug("nx/ny/nz: %s/%s/%s; enc1 min/max: %s/%s; enc2 min/max:%s/%s, ncol: %s" % (nx, ny, nz, enc1_min, enc1_max, enc2_min, enc2_max, group[0].data.shape[-1]))
 
-#         # in case dim sizes smaller than expected, sort data into k-space center (e.g. for reference scans)
-#         ncol = acq.data.shape[-1]
-#         cx = nx // 2
-#         ccol = ncol // 2
-#         col = slice(cx - ccol, cx + ccol)
+    for acq in group:
+        enc1 = acq.idx.kspace_encode_step_1
+        enc2 = acq.idx.kspace_encode_step_2
 
-#         if zf_around_center:
-#             cy = ny // 2
-#             cz = nz // 2
+        # in case dim sizes smaller than expected, sort data into k-space center (e.g. for reference scans)
+        ncol = acq.data.shape[-1]
+        cx = nx // 2
+        ccol = ncol // 2
+        col = slice(cx - ccol, cx + ccol)
 
-#             cenc1 = (enc1_max+1) // 2
-#             cenc2 = (enc2_max+1) // 2
+        if zf_around_center:
+            cy = ny // 2
+            cz = nz // 2
 
-#             # sort data into center k-space (assuming a symmetric acquisition)
-#             enc1 += cy - cenc1
-#             enc2 += cz - cenc2
+            cenc1 = (enc1_max+1) // 2
+            cenc2 = (enc2_max+1) // 2
+
+            # sort data into center k-space (assuming a symmetric acquisition)
+            enc1 += cy - cenc1
+            enc2 += cz - cenc2
         
-#         if dmtx is None:
-#             kspace[enc1, enc2, :, col] += acq.data
-#         else:
-#             kspace[enc1, enc2, :, col] += apply_prewhitening(acq.data, dmtx)
-#         counter[enc1, enc2] += 1
+        if dmtx is None:
+            kspace[enc1, enc2, :, col] += acq.data
+        else:
+            kspace[enc1, enc2, :, col] += apply_prewhitening(acq.data, dmtx)
+        counter[enc1, enc2] += 1
 
-#     # support averaging (with or without acquisition weighting)
-#     kspace /= np.maximum(1, counter[:,:,np.newaxis,np.newaxis])
+    # support averaging (with or without acquisition weighting)
+    kspace /= np.maximum(1, counter[:,:,np.newaxis,np.newaxis])
 
-#     # rearrange kspace for bart - target size: (nx, ny, nz, nc)
-#     kspace = np.transpose(kspace, [3, 0, 1, 2])
+    # rearrange kspace for bart - target size: (nx, ny, nz, nc)
+    kspace = np.transpose(kspace, [3, 0, 1, 2])
 
-#     return kspace
+    return kspace
 
 
 def rot(mat, n_intl, rot=2*np.pi):
@@ -387,33 +517,32 @@ def grad_pred(grad, girf):
     
     Parameters:
     ------------
-    grad: nominal gradient [interleaves, dims, samples]
-    girf:     gradient impulse response function [input dims, output dims (incl k0), samples]
+    grad: nominal gradient [dims, samples]
+    girf: gradient impulse response function [input dims, output dims (incl k0), samples]
     """
-    ndim = grad.shape[1]
+    ndim = grad.shape[0]
     grad_sampl = grad.shape[-1]
     girf_sampl = girf.shape[-1]
 
     # remove k0 from girf:
     girf = girf[:,1:]
-    
+
     # zero-fill grad to number of girf samples (add check?)
-    grad = np.concatenate([grad.copy(), np.zeros([grad.shape[0], ndim, girf_sampl-grad_sampl])], axis=-1)
+    grad = np.concatenate([grad.copy(), np.zeros([ndim, girf_sampl-grad_sampl])], axis=-1)
 
     # FFT
     grad = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(grad, axes=-1), axis=-1), axes=-1)
-    print('girf.shape =%s, grad.shape = %s'%(girf.shape, grad.shape))
 
     # apply girf to nominal gradients
     pred_grad = np.zeros_like(grad)
     for dim in range(ndim):
-        pred_grad[:,dim]=np.sum(grad*girf[np.newaxis,:ndim,dim,:], axis=1)
+        pred_grad[dim]=np.sum(grad*girf[np.newaxis,:ndim,dim,:], axis=1)
 
     # IFFT
     pred_grad = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(pred_grad, axes=-1), axis=-1), axes=-1)
     
     # cut out relevant part
-    pred_grad = pred_grad[:,:,:grad_sampl]
+    pred_grad = pred_grad[:,:grad_sampl]
 
     return pred_grad
 
@@ -425,6 +554,7 @@ def trap_from_area(area, ramptime, ftoptime, dt_grad=10e-6):
     """
     n_ramp = int(ramptime/dt_grad+0.5)
     n_ftop = int(ftoptime/dt_grad+0.5)
+    #print('ramptime = %f, ftoptime = %f, n_ramp = %d, n_ftop = %d'%(ramptime, ftoptime, n_ramp, n_ftop))
     amp = area/(ftoptime+ramptime)
     ramp = np.arange(0.5, n_ramp)/n_ramp
     while np.ndim(ramp) < np.ndim(amp) + 1:
@@ -436,31 +566,44 @@ def trap_from_area(area, ramptime, ftoptime, dt_grad=10e-6):
     grad = np.concatenate((zeros, ramp, amp[..., np.newaxis]*np.ones(area.shape + (n_ftop,)), ramp[...,::-1], zeros), -1)
     return grad
 
+    
 
-def calc_spiral_traj(grad_arr, ncol, dwelltime, fov, rot_mat, delay, spiralType):
-    dt_grad = 10e-6
-    dt_skope = 1e-6
+def calc_traj(acq, hdr, ncol):
+    """ Calculates the kspace trajectory from any gradient using Girf prediction and interpolates it on the adc raster
+
+        acq: acquisition from hdf5 protocol file
+        hdr: header from hdf5 protocol file
+    """
+    def calc_rotmat(acq):
+        phase_dir = acq['phase_dir'][:]
+        read_dir = acq['read_dir'][:]
+        slice_dir = acq['slice_dir'][:]
+        return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
+
+    dt_grad = 10e-6 # [s]
+    dt_skope = 1e-6 # [s]
     gammabar = 42.577e6
 
-    grad = np.swapaxes(grad_arr,0,1) # [T/m]
-    
-    # Determine start of first spiral gradient & first ADC
-    adc_shift = 0
-    if spiralType > 2:
-        # new: small timing fix for double spiral
-        # align center of gradient & adc
-        grad_totaltime = dt_grad * (grad.shape[-1])
-        adc_duration = dwelltime * ncol
-        adc_shift = np.round((grad_totaltime - adc_duration)/2., 6)
-    print("adc_shift = %f, adc_duration = %f"%(adc_shift, dwelltime * ncol))
+    grad = acq['gradients'][:] # [T/m]
+    dims = grad.shape[0]
+    if acq.attrs['trajectory_dimensions'] != dims:
+        print('Warning: Ismrmrd parameter trajectory_dimensions differs from gradient array dimensions.')
+
+    fov = hdr['encoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
+    rotmat = calc_rotmat(acq)
+    dwelltime = 1e-6 * hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
+    gradshift = hdr['userParameters']['userParameterDouble'].attrs['traj_delay']
+
+    # ADC sampling time
+    adctime = dwelltime * np.arange(0.5, ncol)
 
     # add zeros around gradient
-    grad = np.concatenate((np.zeros([grad.shape[0],3,1]), grad, np.zeros([grad.shape[0],3,1])), axis=-1)
-    gradshift = -dt_grad + delay
+    grad = np.concatenate((np.zeros([dims,1]), grad, np.zeros([dims,1])), axis=1)
+    gradshift -= dt_grad
 
-    # time vectors for interpolation
-    gradtime = dt_grad * np.arange(grad.shape[-1]) + gradshift
-    adctime = dwelltime * np.arange(0.5, ncol) + adc_shift
+    # add z-dir for prediction if necessary
+    if dims == 2:
+        grad = np.concatenate((grad, np.zeros([1, grad.shape[1]])), axis=0)
 
     ##############################
     ## girf trajectory prediction:
@@ -470,72 +613,74 @@ def calc_spiral_traj(grad_arr, ncol, dwelltime, fov, rot_mat, delay, spiralType)
     girf = np.load(filepath + "/girf/girf_10us.npy")
 
     # rotation to phys coord system
-    pred_grad = gcs_to_dcs(grad, rot_mat)
+    pred_grad = gcs_to_dcs(grad, rotmat)
 
     # gradient prediction
     pred_grad = grad_pred(pred_grad, girf) 
 
     # rotate back to logical system
-    pred_grad = dcs_to_gcs(pred_grad, rot_mat)
-    pred_grad[:, 2] = 0. # set z-gradient to zero, otherwise bart reco crashes
-    
-    # calculate trajectory 
-    pred_trj = np.cumsum(pred_grad.real, axis=-1)
-    gradshift += dt_grad/2 # account for cumsum
+    pred_grad = dcs_to_gcs(pred_grad, rotmat)
 
-    # proper scaling for bart
+    # time vector for interpolation
+    gradtime = dt_grad * np.arange(pred_grad.shape[-1]) + gradshift
+
+    # calculate trajectory 
+    pred_trj = np.cumsum(pred_grad.real, axis=1)
+    gradtime += dt_grad/2 # account for cumsum
+
+    # proper scaling - WIP: use BART scaling, is this also the Ismrmrd scaling???
     pred_trj *= dt_grad * gammabar * (1e-3 * fov)
-    
-    # account for cumsum shift
-    adctime_girf = dwelltime * np.arange(0.5, ncol) + adc_shift
-    gradtime_pred = dt_grad * np.arange(pred_grad.shape[-1]) + gradshift
 
     # interpolate trajectory to scanner dwelltime
-    pred_trj = intp_axis(adctime_girf, gradtime_pred, pred_trj, axis=-1)
+    pred_trj = intp_axis(adctime, gradtime, pred_trj, axis=1)
     
-    np.save(debugFolder + "/" + "pred_trj.npy", pred_trj)
+    if dims == 2:
+        return pred_trj[:2]
+    else:
+        return pred_trj
 
-    # pred_trj = np.load(filepath + "/girf/girf_traj_doublespiral.npy")
-    # pred_trj = np.transpose(pred_trj, [2, 0, 1])
+def sort_spiral_data(group, metadata, dmtx=None):
+    
+    def calc_rot_mat(acq):
+        phase_dir = np.asarray(acq.phase_dir)
+        read_dir = np.asarray(acq.read_dir)
+        slice_dir = np.asarray(acq.slice_dir)
+        return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
 
-    # now we can switch x and y dir for correct orientation in FIRE
-    pred_trj = pred_trj[:,[1,0,2],:]
+    nx = metadata.encoding[0].encodedSpace.matrixSize.x
+    nz = metadata.encoding[0].encodedSpace.matrixSize.z
+    ncol = group[0].number_of_samples
 
-    ## WIP  
-    # return base_trj
-    return pred_trj
+    rotmat = calc_rot_mat(group[0])
 
+    traj_dims = group[0].trajectory_dimensions
+    traj = [np.swapaxes(grp.traj[:],0,1) for grp in group]
+    traj = np.stack(traj) # [intl, dims, samples]
 
-def sort_spiral_data(group, prot, dmtx=None):
+    print(traj.shape)
+    if traj_dims == 2:
+        traj = np.concatenate((traj, np.zeros([traj.shape[0], 1, traj.shape[2]])), axis=1)
+    
 
-    # spiral_af = metadata.encoding[0].parallelImaging.accelerationFactor.kspace_encoding_step_1
-    ncol = prot['ADC'].attrs['num_samples']
-    nz = 1 # WIP: 3D imaging not supported yet
-    spiralType = prot['Gradients'].attrs['spiraltype']
-    fov = prot['Sequence'].attrs['fov']
-    dwelltime = prot['ADC'].attrs['dwelltime']
-    grad_arr = prot['Gradients']['grads'][:]
-    rot_mat = prot['Misc']['rotmat'][:]
-    avgs = prot['Sequence'].attrs['averages']
-    delay = prot['ADC'].attrs['spiral_delay'] # additional delay of the spiral gradient
-
-    base_trj = calc_spiral_traj(grad_arr, ncol, dwelltime, fov, rot_mat, delay, spiralType)
+    # switch x and y dir for correct orientation in FIRE
+    traj = traj[:,[1,0,2],:]
 
     sig = list()
     trj = list()
     enc = list()
     for acq in group:
         enc1 = acq.idx.kspace_encode_step_1
-        # WIP: this is for 3D imaging (number of the partition)
-        # enc2 = acq.idx.kspace_encode_step_2
-        #kz = enc2 - nz//2 WIP: 3D
+        enc2 = acq.idx.kspace_encode_step_2
+
+        kz = enc2 - nz//2
         
-        enc.append([enc1])
+        enc.append([enc1, enc2])
         
         # update 3D dir.
-        tmp = base_trj[enc1%15].copy()
-        # tmp[-1] = kz * np.ones(tmp.shape[-1]) WIP: 3D
-        trj.append(tmp)    
+        if traj_dims == 2:
+            tmp = traj[enc1].copy()
+            tmp[-1] = kz * np.ones(tmp.shape[-1])
+            trj.append(tmp)
 
         # and append data after optional prewhitening
         if dmtx is None:
@@ -543,18 +688,12 @@ def sort_spiral_data(group, prot, dmtx=None):
         else:
             sig.append(apply_prewhitening(acq.data, dmtx))
 
-        # apply fov shift - WIP
-        # shift = pcs_to_gcs(np.asarray(acq.position), rot_mat)
-        # sig[-1] = fov_shift_spiral(sig[-1], tmp, shift, nx)
+        # apply fov shift
+        shift = pcs_to_gcs(np.asarray(acq.position), rotmat)
+        sig[-1] = fov_shift_spiral(sig[-1], tmp, shift, nx)
 
     np.save(debugFolder + "/" + "enc.npy", enc)
     
-    # convert lists to numpy arrays
-    trj = np.asarray(trj) # current size: (nacq, 3, ncol)
-    sig = np.asarray(sig) # current size: (nacq, ncha, ncol)
-
-    sig = sig.reshape([avgs] + [k for k in sig.shape]).mean(0) # average
-
     # rearrange trj & sig for bart - target size: ??? WIP  --(ncol, enc1_max, nz, nc)
     trj = np.transpose(trj, [1, 2, 0])
     sig = np.transpose(sig, [2, 0, 1])[np.newaxis]
@@ -566,43 +705,38 @@ def sort_spiral_data(group, prot, dmtx=None):
     return sig, trj
 
 
-# WIP: try first without sensmaps
-
-# def process_acs(group, config, metadata, dmtx=None):
-#     if len(group)>0:
-#         data = sort_into_kspace(group, metadata, dmtx, zf_around_center=True)
-#         data = remove_os(data)
-#         sensmaps = bart(1, 'ecalib -m 1 -k 8 -I -r 48', data)  # ESPIRiT calibration
-#         np.save(debugFolder + "/" + "acs.npy", data)
-#         np.save(debugFolder + "/" + "sensmaps.npy", sensmaps)
-#         return sensmaps
-#     else:
-#         return None
+def process_acs(group, config, metadata, dmtx=None):
+    if len(group)>0:
+        data = sort_into_kspace(group, metadata, dmtx, zf_around_center=True)
+        data = remove_os(data)
+        sensmaps = bart(1, 'ecalib -m 1 -k 8 -I -r 48', data)  # ESPIRiT calibration
+        np.save(debugFolder + "/" + "acs.npy", data)
+        np.save(debugFolder + "/" + "sensmaps.npy", sensmaps)
+        return sensmaps
+    else:
+        return None
 
 
-def process_raw(group, config, prot, dmtx=None, sensmaps=None):
+def process_raw(group, config, metadata, dmtx=None, sensmaps=None):
 
-    fov = prot['Sequence'].attrs['fov']
-    res = prot['Sequence'].attrs['res']
-    nx = round(fov/res)
-    ny = nx
-    nz = 1 # WIP: no 3D imaging supported yet
+    nx = metadata.encoding[0].encodedSpace.matrixSize.x
+    ny = metadata.encoding[0].encodedSpace.matrixSize.y
+    nz = metadata.encoding[0].encodedSpace.matrixSize.z
     
-    # rNx = metadata.encoding[0].reconSpace.matrixSize.x
-    # rNy = metadata.encoding[0].reconSpace.matrixSize.y
-    rNz = 1
+    rNx = metadata.encoding[0].reconSpace.matrixSize.x
+    rNy = metadata.encoding[0].reconSpace.matrixSize.y
+    rNz = metadata.encoding[0].reconSpace.matrixSize.z
 
-    data, trj = sort_spiral_data(group, prot, dmtx)
+    data, trj = sort_spiral_data(group, metadata, dmtx)
 
-    #logging.debug("Raw data is size %s" % (data.shape,))
-    print("FOV")
+    logging.debug("Raw data is size %s" % (data.shape,))
     logging.debug("nx,ny,nz %s, %s, %s" % (nx, ny, nz))
     np.save(debugFolder + "/" + "raw.npy", data)
     
     # if sensmaps is None: # assume that this is a fully sampled scan (wip: only use autocalibration region in center k-space)
         # sensmaps = bart(1, 'ecalib -m 1 -I ', data)  # ESPIRiT calibration
 
-    force_pics = False
+    force_pics = True
     if sensmaps is None and force_pics:
         sensmaps = bart(1, 'nufft -i -t -c -d %d:%d:%d'%(nx, nx, nz), trj, data) # nufft
         sensmaps = cfftn(sensmaps, [0, 1, 2]) # back to k-space
@@ -610,7 +744,7 @@ def process_raw(group, config, prot, dmtx=None, sensmaps=None):
 
     if sensmaps is None:
         logging.debug("no pics necessary, just do standard recon")
-        
+            
         # bart nufft with nominal trajectory
         data = bart(1, 'nufft -i -t -c -d %d:%d:%d'%(nx, nx, nz), trj, data) # nufft
         # data = bart(1, 'nufft -i -t -c', trj, data) # nufft
