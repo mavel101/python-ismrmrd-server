@@ -73,7 +73,7 @@ def insert_hdr(prot_file, metadata):
         try:
             prot = h5py.File(prot_file+'.h5', 'r')
         except:
-            print('Pulseq protocol file not found.')
+            raise ValueError('Pulseq protocol file not found.')
 
     prot_hdr = prot['hdr']
 
@@ -90,6 +90,8 @@ def insert_hdr(prot_file, metadata):
 
     dset_enc1 = metadata.encoding[0]
     prot_enc1 = prot_hdr['encoding']['0']
+    dset_enc1.trajectory = prot_enc1.attrs['trajectory']
+
     dset_enc1.encodedSpace.matrixSize.x = prot_enc1['encodedSpace']['matrixSize'].attrs['x']
     dset_enc1.encodedSpace.matrixSize.y = prot_enc1['encodedSpace']['matrixSize'].attrs['y']
     dset_enc1.encodedSpace.matrixSize.z = prot_enc1['encodedSpace']['matrixSize'].attrs['z']
@@ -164,12 +166,13 @@ def insert_acq(prot_file, acq, acq_ctr):
 
     # calculate trajectory with GIRF prediction
     traj = calc_traj(prot_acq, prot_hdr, acq.number_of_samples)
-    acq.traj[:] = np.swapaxes(traj,0,1) # [dims, samples]
+    acq.traj[:] = np.swapaxes(traj,0,1) # [samples, dims]
 
     prot.close()
 
 # Folder for debug output files and protocol
 debugFolder = "/tmp/share/debug"
+protFolder = "tmp/share/dependency/pulseq_protocols"
 
 def process(connection, config, metadata):
 
@@ -178,10 +181,10 @@ def process(connection, config, metadata):
         os.makedirs(debugFolder)
         logging.debug("Created folder " + debugFolder + " for debug output files")
 
-    #prot_filename = metadata.userParameters.userParameterString[0].value_ # protocol filename from Siemens protocol parameter tFree
-    prot_filename = 'fire_test_pulseq_prot'
-    prot_file = debugFolder + "/" + prot_filename
+    prot_filename = metadata.userParameters.userParameterString[0].value_ # protocol filename from Siemens protocol parameter tFree
+    prot_file = protFolder + "/" + prot_filename
 
+    # insert protocol header
     insert_hdr(prot_file, metadata)
     logging.info("Config: \n%s", config)
 
@@ -193,7 +196,7 @@ def process(connection, config, metadata):
         # logging.info("Metadata: \n%s", metadata.serialize())
 
         logging.info("Incoming dataset contains %d encodings", len(metadata.encoding))
-        logging.info("First encoding is of type '%s', with a field of view of (%s x %s x %s)mm^3 and a matrix size of (%s x %s x %s)", 
+        logging.info("First encoding is of type '%s', with a matrix size of (%s x %s x %s) and a field of view of (%s x %s x %s)mm^3", 
             metadata.encoding[0].trajectory, 
             metadata.encoding[0].encodedSpace.matrixSize.x, 
             metadata.encoding[0].encodedSpace.matrixSize.y, 
@@ -218,12 +221,13 @@ def process(connection, config, metadata):
     try:
         for acq_ctr, item in enumerate(connection):
 
-            insert_acq(prot_file, item, acq_ctr)
-
             # ----------------------------------------------------------
             # Raw k-space data messages
             # ----------------------------------------------------------
             if isinstance(item, ismrmrd.Acquisition):
+
+                # insert acquisition protocol
+                insert_acq(prot_file, item, acq_ctr)
 
                 # wip: run noise decorrelation
                 if item.is_flag_set(ismrmrd.ACQ_IS_NOISE_MEASUREMENT):
@@ -657,7 +661,6 @@ def sort_spiral_data(group, metadata, dmtx=None):
     traj = [np.swapaxes(grp.traj[:],0,1) for grp in group]
     traj = np.stack(traj) # [intl, dims, samples]
 
-    print(traj.shape)
     if traj_dims == 2:
         traj = np.concatenate((traj, np.zeros([traj.shape[0], 1, traj.shape[2]])), axis=1)
     

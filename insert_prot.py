@@ -41,6 +41,8 @@ def insert_prot(prot_file, data_file):
 
     dset_enc1 = dset_hdr.encoding[0]
     prot_enc1 = prot_hdr['encoding']['0']
+    dset_enc1.trajectory = prot_enc1.attrs['trajectory']
+
     dset_enc1.encodedSpace.matrixSize.x = prot_enc1['encodedSpace']['matrixSize'].attrs['x']
     dset_enc1.encodedSpace.matrixSize.y = prot_enc1['encodedSpace']['matrixSize'].attrs['y']
     dset_enc1.encodedSpace.matrixSize.z = prot_enc1['encodedSpace']['matrixSize'].attrs['z']
@@ -107,7 +109,7 @@ def insert_prot(prot_file, data_file):
 
         # calculate trajectory with GIRF prediction
         traj = calc_traj(prot_acq, prot_hdr, dset_acq.number_of_samples)
-        dset_acq.traj[:] = np.swapaxes(traj,0,1) # [dims, samples]
+        dset_acq.traj[:] = np.swapaxes(traj,0,1) # [samples, dims]
 
         dset.write_acquisition(dset_acq, n)
 
