@@ -61,6 +61,127 @@ def apply_prewhitening(data, dmtx):
     return np.asarray(np.asmatrix(dmtx)*np.asmatrix(data.reshape(data.shape[0],data.size//data.shape[0]))).reshape(s)
     
 
+def pcs_to_dcs(grads, patient_position='HFS'):
+    """ Convert from patient coordinate system (PCS, physical) 
+        to device coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    """
+    grads = grads.copy()
+
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    if patient_position.upper() == 'HFS':
+        grads[1] *= -1
+        grads[2] *= -1
+    else:
+        raise ValueError
+
+    return grads
+
+def dcs_to_pcs(grads, patient_position='HFS'):
+    """ Convert from device coordinate system (DCS, physical) 
+        to patient coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    """
+    return pcs_to_dcs(grads, patient_position) # same sign switch
+    
+def gcs_to_pcs(grads, rotmat):
+    """ Convert from gradient coordinate system (GCS, logical) 
+        to patient coordinate system (DCS, physical)
+    """
+    return np.matmul(rotmat, grads)
+
+def pcs_to_gcs(grads, rotmat):
+    """ Convert from patient coordinate system (PCS, physical) 
+        to gradient coordinate system (GCS, logical) 
+    """
+    return np.matmul(np.linalg.inv(rotmat), grads)
+
+def gcs_to_dcs(grads, rotmat):
+    """ Convert from gradient coordinate system (GCS, logical) 
+        to device coordinate system (DCS, physical)
+        this is valid for patient orientation head first/supine
+    Parameters
+    ----------
+    grads : numpy array [3, intl, samples]
+            gradient to be converted
+    rotmat: numpy array [3,3]
+            rotation matrix from quaternion from Siemens Raw Data header
+    Returns
+    -------
+    grads_cv : numpy.ndarray
+               Converted gradient
+    """
+    grads = grads.copy()
+
+    # rotation from GCS (PHASE,READ,SLICE) to patient coordinate system (PCS)
+    grads = gcs_to_pcs(grads, rotmat)
+    
+    # PCS (SAG,COR,TRA) to DCS (X,Y,Z)
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    grads = pcs_to_dcs(grads)
+    
+    return grads
+
+
+def dcs_to_gcs(grads, rotmat):
+    """ Convert from device coordinate system (DCS, logical) 
+        to gradient coordinate system (GCS, physical)
+        this is valid for patient orientation head first/supine
+    Parameters
+    ----------
+    grads : numpy array [3, intl, samples]
+            gradient to be converted
+    rotmat: numpy array [3,3]
+            rotation matrix from quaternion from Siemens Raw Data header
+    Returns
+    -------
+    grads_cv : numpy.ndarray
+               Converted gradient
+    """
+    grads = grads.copy()
+    
+    # DCS (X,Y,Z) to PCS (SAG,COR,TRA)
+    # only valid for head first/supine - other orientations see IDEA UserGuide
+    grads = dcs_to_pcs(grads)
+    
+    # PCS (SAG,COR,TRA) to GCS (PHASE,READ,SLICE)
+    grads = pcs_to_gcs(grads, rotmat)
+    
+    return grads
+
+
+def fov_shift_spiral(sig, trj, shift, matr_sz):
+    """ 
+    shift field of view of spiral data
+    sig:  rawdata [ncha, nsamples]
+    trj:    trajectory [3, nsamples]
+    # shift:   shift [x_shift, y_shift] in voxel
+    shift:   shift [y_shift, x_shift] in voxel
+    matr_sz: matrix size of reco
+    """
+
+    if (abs(shift[0]) < 1e-2) and (abs(shift[1]) < 1e-2):
+        # nothing to do
+        return sig
+
+    kmax = int(matr_sz/2+0.5)
+    sig *= np.exp(-1j*(shift[0]*np.pi*trj[0]/kmax-shift[1]*np.pi*trj[1]/kmax))[np.newaxis]
+
+    return sig
+
+def intp_axis(newgrid, oldgrid, data, axis=0):
+    # interpolation along an axis (shape of newgrid, oldgrid and data see np.interp)
+    tmp = np.moveaxis(data.copy(), axis, 0)
+    newshape = (len(newgrid),) + tmp.shape[1:]
+    tmp = tmp.reshape((len(oldgrid), -1))
+    n_elem = tmp.shape[-1]
+    intp_data = np.zeros((len(newgrid), n_elem), dtype=data.dtype)
+    for k in range(n_elem):
+        intp_data[:, k] = np.interp(newgrid, oldgrid, tmp[:, k])
+    intp_data = intp_data.reshape(newshape)
+    intp_data = np.moveaxis(intp_data, 0, axis)
+    return intp_data 
+
 def insert_hdr(prot_file, metadata): 
 
     #---------------------------
@@ -169,6 +290,115 @@ def insert_acq(prot_file, acq, acq_ctr):
     acq.traj[:] = np.swapaxes(traj,0,1) # [samples, dims]
 
     prot.close()
+
+def calc_traj(acq, hdr, ncol):
+    """ Calculates the kspace trajectory from any gradient using Girf prediction and interpolates it on the adc raster
+
+        acq: acquisition from hdf5 protocol file
+        hdr: header from hdf5 protocol file
+    """
+    def calc_rotmat(acq):
+        phase_dir = acq['phase_dir'][:]
+        read_dir = acq['read_dir'][:]
+        slice_dir = acq['slice_dir'][:]
+        return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
+
+    dt_grad = 10e-6 # [s]
+    dt_skope = 1e-6 # [s]
+    gammabar = 42.577e6
+
+    grad = acq['gradients'][:] # [dims, samples] [T/m]
+    dims = grad.shape[0]
+    if acq.attrs['trajectory_dimensions'] != dims:
+        print('Warning: Ismrmrd parameter trajectory_dimensions differs from gradient array dimensions.')
+
+    fov = hdr['encoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
+    rotmat = calc_rotmat(acq)
+    dwelltime = 1e-6 * hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
+    gradshift = hdr['userParameters']['userParameterDouble'].attrs['traj_delay']
+
+    # ADC sampling time
+    adctime = dwelltime * np.arange(0.5, ncol)
+
+    # add some zeros around gradient for right interpolation
+    zeros = 10
+    grad = np.concatenate((np.zeros([dims,zeros]), grad, np.zeros([dims,zeros])), axis=1)
+    gradshift -= zeros*dt_grad
+
+    # add z-dir for prediction if necessary
+    if dims == 2:
+        grad = np.concatenate((grad, np.zeros([1, grad.shape[1]])), axis=0)
+
+    ##############################
+    ## girf trajectory prediction:
+    ##############################
+
+    filepath = os.path.dirname(os.path.abspath(__file__))
+    girf = np.load(filepath + "/girf/girf_10us.npy")
+
+    # rotation to phys coord system
+    grad_phys = gcs_to_dcs(grad, rotmat)
+
+    # gradient prediction
+    pred_grad = grad_pred(grad_phys, girf)
+
+    # rotate back to logical system
+    pred_grad = dcs_to_gcs(pred_grad, rotmat)
+
+    # time vector for interpolation
+    gradtime = dt_grad * np.arange(pred_grad.shape[-1]) + gradshift
+
+    # calculate trajectory 
+    pred_trj = np.cumsum(pred_grad.real, axis=1)
+    gradtime += dt_grad/2 - dt_skope/2 # account for cumsum - WIP: Is the dt_skope/2 delay necessary?? Comnpare to skope trajectory data
+
+    # proper scaling - WIP: use BART scaling, is this also the Ismrmrd scaling???
+    pred_trj *= dt_grad * gammabar * (1e-3 * fov)
+
+    # interpolate trajectory to scanner dwelltime
+    pred_trj = intp_axis(adctime, gradtime, pred_trj, axis=1)
+    
+    if dims == 2:
+        return pred_trj[:2]
+    else:
+        return pred_trj
+
+def grad_pred(grad, girf):
+    """
+    gradient prediction with girf
+    
+    Parameters:
+    ------------
+    grad: nominal gradient [dims, samples]
+    girf: gradient impulse response function [input dims, output dims (incl k0), samples]
+    """
+    ndim = grad.shape[0]
+    grad_sampl = grad.shape[-1]
+    girf_sampl = girf.shape[-1]
+
+    # remove k0 from girf:
+    girf = girf[:,1:]
+
+    # zero-fill grad to number of girf samples (add check?)
+    grad = np.concatenate([grad.copy(), np.zeros([ndim, girf_sampl-grad_sampl])], axis=-1)
+
+    # FFT
+    grad = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(grad, axes=-1), axis=-1), axes=-1)
+
+    # apply girf to nominal gradients
+    pred_grad = np.zeros_like(grad)
+    for dim in range(ndim):
+        pred_grad[dim]=np.sum(grad*girf[np.newaxis,:ndim,dim,:], axis=1)
+
+    # IFFT
+    pred_grad = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(pred_grad, axes=-1), axis=-1), axes=-1)
+    
+    # cut out relevant part
+    pred_grad = pred_grad[:,:grad_sampl]
+
+    return pred_grad
+
+#############################################################
 
 # Folder for debug output files and protocol
 debugFolder = "/tmp/share/debug"
@@ -375,273 +605,6 @@ def sort_into_kspace(group, metadata, dmtx=None, zf_around_center=False):
     kspace = np.transpose(kspace, [3, 0, 1, 2])
 
     return kspace
-
-
-def rot(mat, n_intl, rot=2*np.pi):
-    # rotate spiral gradient
-    # trj is a 2D trajectory or gradient arrays ([2, n_samples]), n_intlv is the number of spiral interleaves
-    # returns a new trajectory/gradient array with size [n_intl, 2, n_samples]
-    phi = np.linspace(0, rot, n_intl, endpoint=False)
-
-    # rot_mat = np.asarray([[np.cos(phi), -np.sin(phi)], [np.sin(phi), np.cos(phi)]])
-    # new orientation (switch x and y):
-    rot_mat = np.asarray([[np.cos(phi), np.sin(phi)], [-np.sin(phi), np.cos(phi)]])
-    rot_mat = np.moveaxis(rot_mat,-1,0)
-
-    return rot_mat @ mat
-
-
-def pcs_to_dcs(grads, patient_position='HFS'):
-    """ Convert from patient coordinate system (PCS, physical) 
-        to device coordinate system (DCS, physical)
-        this is valid for patient orientation head first/supine
-    """
-    grads = grads.copy()
-
-    # only valid for head first/supine - other orientations see IDEA UserGuide
-    if patient_position.upper() == 'HFS':
-        grads[:,1] *= -1
-        grads[:,2] *= -1
-    else:
-        raise ValueError
-
-    return grads
-
-def dcs_to_pcs(grads, patient_position='HFS'):
-    """ Convert from device coordinate system (DCS, physical) 
-        to patient coordinate system (DCS, physical)
-        this is valid for patient orientation head first/supine
-    """
-    return pcs_to_dcs(grads, patient_position) # same sign switch
-    
-def gcs_to_pcs(grads, rotmat):
-    """ Convert from gradient coordinate system (GCS, logical) 
-        to patient coordinate system (DCS, physical)
-    """
-    return np.matmul(rotmat, grads)
-
-def pcs_to_gcs(grads, rotmat):
-    """ Convert from patient coordinate system (PCS, physical) 
-        to gradient coordinate system (GCS, logical) 
-    """
-    return np.matmul(np.linalg.inv(rotmat), grads)
-
-def gcs_to_dcs(grads, rotmat):
-    """ Convert from gradient coordinate system (GCS, logical) 
-        to device coordinate system (DCS, physical)
-        this is valid for patient orientation head first/supine
-    Parameters
-    ----------
-    grads : numpy array [3, intl, samples]
-            gradient to be converted
-    rotmat: numpy array [3,3]
-            rotation matrix from quaternion from Siemens Raw Data header
-    Returns
-    -------
-    grads_cv : numpy.ndarray
-               Converted gradient
-    """
-    grads = grads.copy()
-
-    # rotation from GCS (PHASE,READ,SLICE) to patient coordinate system (PCS)
-    grads = gcs_to_pcs(grads, rotmat)
-    
-    # PCS (SAG,COR,TRA) to DCS (X,Y,Z)
-    # only valid for head first/supine - other orientations see IDEA UserGuide
-    grads = pcs_to_dcs(grads)
-    
-    return grads
-
-
-def dcs_to_gcs(grads, rotmat):
-    """ Convert from device coordinate system (DCS, logical) 
-        to gradient coordinate system (GCS, physical)
-        this is valid for patient orientation head first/supine
-    Parameters
-    ----------
-    grads : numpy array [3, intl, samples]
-            gradient to be converted
-    rotmat: numpy array [3,3]
-            rotation matrix from quaternion from Siemens Raw Data header
-    Returns
-    -------
-    grads_cv : numpy.ndarray
-               Converted gradient
-    """
-    grads = grads.copy()
-    
-    # DCS (X,Y,Z) to PCS (SAG,COR,TRA)
-    # only valid for head first/supine - other orientations see IDEA UserGuide
-    grads = dcs_to_pcs(grads)
-    
-    # PCS (SAG,COR,TRA) to GCS (PHASE,READ,SLICE)
-    grads = pcs_to_gcs(grads, rotmat)
-    
-    return grads
-
-
-def fov_shift_spiral(sig, trj, shift, matr_sz):
-    """ 
-    shift field of view of spiral data
-    sig:  rawdata [ncha, nsamples]
-    trj:    trajectory [3, nsamples]
-    # shift:   shift [x_shift, y_shift] in voxel
-    shift:   shift [y_shift, x_shift] in voxel
-    matr_sz: matrix size of reco
-    """
-
-    if (abs(shift[0]) < 1e-2) and (abs(shift[1]) < 1e-2):
-        # nothing to do
-        return sig
-
-    kmax = int(matr_sz/2+0.5)
-    sig *= np.exp(-1j*(shift[0]*np.pi*trj[0]/kmax-shift[1]*np.pi*trj[1]/kmax))[np.newaxis]
-
-    return sig
-
-
-
-def intp_axis(newgrid, oldgrid, data, axis=0):
-    # interpolation along an axis (shape of newgrid, oldgrid and data see np.interp)
-    tmp = np.moveaxis(data.copy(), axis, 0)
-    newshape = (len(newgrid),) + tmp.shape[1:]
-    tmp = tmp.reshape((len(oldgrid), -1))
-    n_elem = tmp.shape[-1]
-    intp_data = np.zeros((len(newgrid), n_elem), dtype=data.dtype)
-    for k in range(n_elem):
-        intp_data[:, k] = np.interp(newgrid, oldgrid, tmp[:, k])
-    intp_data = intp_data.reshape(newshape)
-    intp_data = np.moveaxis(intp_data, 0, axis)
-    return intp_data
-
-
-def grad_pred(grad, girf):
-    """
-    gradient prediction with girf
-    
-    Parameters:
-    ------------
-    grad: nominal gradient [dims, samples]
-    girf: gradient impulse response function [input dims, output dims (incl k0), samples]
-    """
-    ndim = grad.shape[0]
-    grad_sampl = grad.shape[-1]
-    girf_sampl = girf.shape[-1]
-
-    # remove k0 from girf:
-    girf = girf[:,1:]
-
-    # zero-fill grad to number of girf samples (add check?)
-    grad = np.concatenate([grad.copy(), np.zeros([ndim, girf_sampl-grad_sampl])], axis=-1)
-
-    # FFT
-    grad = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(grad, axes=-1), axis=-1), axes=-1)
-
-    # apply girf to nominal gradients
-    pred_grad = np.zeros_like(grad)
-    for dim in range(ndim):
-        pred_grad[dim]=np.sum(grad*girf[np.newaxis,:ndim,dim,:], axis=1)
-
-    # IFFT
-    pred_grad = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(pred_grad, axes=-1), axis=-1), axes=-1)
-    
-    # cut out relevant part
-    pred_grad = pred_grad[:,:grad_sampl]
-
-    return pred_grad
-
-
-def trap_from_area(area, ramptime, ftoptime, dt_grad=10e-6):
-    """create trapezoidal_gradient with selectable gradient moment
-    area in [T/m*s]
-    ramptime/ftoptime in [s]
-    """
-    n_ramp = int(ramptime/dt_grad+0.5)
-    n_ftop = int(ftoptime/dt_grad+0.5)
-    #print('ramptime = %f, ftoptime = %f, n_ramp = %d, n_ftop = %d'%(ramptime, ftoptime, n_ramp, n_ftop))
-    amp = area/(ftoptime+ramptime)
-    ramp = np.arange(0.5, n_ramp)/n_ramp
-    while np.ndim(ramp) < np.ndim(amp) + 1:
-        ramp = ramp[np.newaxis]
-    
-    ramp = amp[..., np.newaxis] * ramp
-        
-    zeros = np.zeros(area.shape + (1,))
-    grad = np.concatenate((zeros, ramp, amp[..., np.newaxis]*np.ones(area.shape + (n_ftop,)), ramp[...,::-1], zeros), -1)
-    return grad
-
-    
-
-def calc_traj(acq, hdr, ncol):
-    """ Calculates the kspace trajectory from any gradient using Girf prediction and interpolates it on the adc raster
-
-        acq: acquisition from hdf5 protocol file
-        hdr: header from hdf5 protocol file
-    """
-    def calc_rotmat(acq):
-        phase_dir = acq['phase_dir'][:]
-        read_dir = acq['read_dir'][:]
-        slice_dir = acq['slice_dir'][:]
-        return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
-
-    dt_grad = 10e-6 # [s]
-    dt_skope = 1e-6 # [s]
-    gammabar = 42.577e6
-
-    grad = acq['gradients'][:] # [T/m]
-    dims = grad.shape[0]
-    if acq.attrs['trajectory_dimensions'] != dims:
-        print('Warning: Ismrmrd parameter trajectory_dimensions differs from gradient array dimensions.')
-
-    fov = hdr['encoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
-    rotmat = calc_rotmat(acq)
-    dwelltime = 1e-6 * hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
-    gradshift = hdr['userParameters']['userParameterDouble'].attrs['traj_delay']
-
-    # ADC sampling time
-    adctime = dwelltime * np.arange(0.5, ncol)
-
-    # add zeros around gradient
-    grad = np.concatenate((np.zeros([dims,1]), grad, np.zeros([dims,1])), axis=1)
-    gradshift -= dt_grad
-
-    # add z-dir for prediction if necessary
-    if dims == 2:
-        grad = np.concatenate((grad, np.zeros([1, grad.shape[1]])), axis=0)
-
-    ##############################
-    ## girf trajectory prediction:
-    ##############################
-
-    filepath = os.path.dirname(os.path.abspath(__file__))
-    girf = np.load(filepath + "/girf/girf_10us.npy")
-
-    # rotation to phys coord system
-    pred_grad = gcs_to_dcs(grad, rotmat)
-
-    # gradient prediction
-    pred_grad = grad_pred(pred_grad, girf) 
-
-    # rotate back to logical system
-    pred_grad = dcs_to_gcs(pred_grad, rotmat)
-
-    # time vector for interpolation
-    gradtime = dt_grad * np.arange(pred_grad.shape[-1]) + gradshift
-
-    # calculate trajectory 
-    pred_trj = np.cumsum(pred_grad.real, axis=1)
-    gradtime += dt_grad/2 # account for cumsum
-
-    # proper scaling - WIP: use BART scaling, is this also the Ismrmrd scaling???
-    pred_trj *= dt_grad * gammabar * (1e-3 * fov)
-
-    # interpolate trajectory to scanner dwelltime
-    pred_trj = intp_axis(adctime, gradtime, pred_trj, axis=1)
-    
-    if dims == 2:
-        return pred_trj[:2]
-    else:
-        return pred_trj
 
 def sort_spiral_data(group, metadata, dmtx=None):
     
