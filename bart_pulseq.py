@@ -1,6 +1,5 @@
 
 import ismrmrd
-import h5py # WIP: remove this and replace protocol by Ismrmrd Protocol
 import os
 import itertools
 import logging
@@ -60,7 +59,6 @@ def apply_prewhitening(data, dmtx):
     s = data.shape
     return np.asarray(np.asmatrix(dmtx)*np.asmatrix(data.reshape(data.shape[0],data.size//data.shape[0]))).reshape(s)
     
-
 def pcs_to_dcs(grads, patient_position='HFS'):
     """ Convert from patient coordinate system (PCS, physical) 
         to device coordinate system (DCS, physical)
@@ -149,7 +147,6 @@ def dcs_to_gcs(grads, rotmat):
     
     return grads
 
-
 def fov_shift_spiral(sig, trj, shift, matr_sz):
     """ 
     shift field of view of spiral data
@@ -189,46 +186,46 @@ def insert_hdr(prot_file, metadata):
     #---------------------------
 
     try:
-        prot = h5py.File(prot_file+'.hdf5', 'r')
+        prot = ismrmrd.Dataset(prot_file+'.hdf5', create_if_needed=False)
     except:
         try:
-            prot = h5py.File(prot_file+'.h5', 'r')
+            prot = ismrmrd.Dataset(prot_file+'.h5', create_if_needed=False)
         except:
             raise ValueError('Pulseq protocol file not found.')
-
-    prot_hdr = prot['hdr']
 
     #---------------------------
     # Process the header 
     #---------------------------
 
-    prot_hdr = prot['hdr']
+    prot_hdr = ismrmrd.xsd.CreateFromDocument(prot.read_xml_header())
 
-    dset_user_prm_dbl = metadata.userParameters.userParameterDouble
-    prot_user_prm_dbl = prot_hdr['userParameters']['userParameterDouble']
-    dset_user_prm_dbl[0].value_ = prot_user_prm_dbl.attrs['dwellTime_us']
-    dset_user_prm_dbl[1].value_ = prot_user_prm_dbl.attrs['traj_delay'] # additional trajectory delay [s]
+    dset_udbl = metadata.userParameters.userParameterDouble
+    prot_udbl = prot_hdr.userParameters.userParameterDouble
+    dset_udbl[0].name = prot_udbl[0].name # dwellTime_us
+    dset_udbl[0].value_ = prot_udbl[0].value_
+    dset_udbl[1].name = prot_udbl[1].name # traj_delay (additional delay of trajectory [s])
+    dset_udbl[1].value_ = prot_udbl[1].value_
 
-    dset_enc1 = metadata.encoding[0]
-    prot_enc1 = prot_hdr['encoding']['0']
-    dset_enc1.trajectory = prot_enc1.attrs['trajectory']
+    dset_e1 = metadata.encoding[0]
+    prot_e1 = prot_hdr.encoding[0]
+    dset_e1.trajectory = prot_e1.trajectory
 
-    dset_enc1.encodedSpace.matrixSize.x = prot_enc1['encodedSpace']['matrixSize'].attrs['x']
-    dset_enc1.encodedSpace.matrixSize.y = prot_enc1['encodedSpace']['matrixSize'].attrs['y']
-    dset_enc1.encodedSpace.matrixSize.z = prot_enc1['encodedSpace']['matrixSize'].attrs['z']
+    dset_e1.encodedSpace.matrixSize.x = prot_e1.encodedSpace.matrixSize.x
+    dset_e1.encodedSpace.matrixSize.y = prot_e1.encodedSpace.matrixSize.y
+    dset_e1.encodedSpace.matrixSize.z =  prot_e1.encodedSpace.matrixSize.z
     
-    dset_enc1.encodedSpace.fieldOfView_mm.x = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['x']
-    dset_enc1.encodedSpace.fieldOfView_mm.y = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['y']
-    dset_enc1.encodedSpace.fieldOfView_mm.z = prot_enc1['encodedSpace']['fieldOfView_mm'].attrs['z']
+    dset_e1.encodedSpace.fieldOfView_mm.x = prot_e1.encodedSpace.fieldOfView_mm.x
+    dset_e1.encodedSpace.fieldOfView_mm.y = prot_e1.encodedSpace.fieldOfView_mm.y
+    dset_e1.encodedSpace.fieldOfView_mm.z = prot_e1.encodedSpace.fieldOfView_mm.z
     
-    dset_enc1.reconSpace.matrixSize.x = prot_enc1['reconSpace']['matrixSize'].attrs['x']
-    dset_enc1.reconSpace.matrixSize.y = prot_enc1['reconSpace']['matrixSize'].attrs['y']
-    dset_enc1.reconSpace.matrixSize.z = prot_enc1['reconSpace']['matrixSize'].attrs['z']
+    dset_e1.reconSpace.matrixSize.x = prot_e1.reconSpace.matrixSize.x
+    dset_e1.reconSpace.matrixSize.y = prot_e1.reconSpace.matrixSize.y
+    dset_e1.reconSpace.matrixSize.z = prot_e1.reconSpace.matrixSize.z
     
-    dset_enc1.reconSpace.fieldOfView_mm.x = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['x']
-    dset_enc1.reconSpace.fieldOfView_mm.y = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['y']
-    dset_enc1.reconSpace.fieldOfView_mm.z = prot_enc1['reconSpace']['fieldOfView_mm'].attrs['z']
-
+    dset_e1.reconSpace.fieldOfView_mm.x = prot_e1.reconSpace.fieldOfView_mm.x
+    dset_e1.reconSpace.fieldOfView_mm.y = prot_e1.reconSpace.fieldOfView_mm.y
+    dset_e1.reconSpace.fieldOfView_mm.z = prot_e1.reconSpace.fieldOfView_mm.z
+    
     prot.close()
 
 def insert_acq(prot_file, acq, acq_ctr):
@@ -238,56 +235,54 @@ def insert_acq(prot_file, acq, acq_ctr):
     #---------------------------
 
     try:
-        prot = h5py.File(prot_file+'.hdf5', 'r')
+        prot = ismrmrd.Dataset(prot_file+'.hdf5', create_if_needed=False)
     except:
         try:
-            prot = h5py.File(prot_file+'.h5', 'r')
+            prot = ismrmrd.Dataset(prot_file+'.h5', create_if_needed=False)
         except:
-            print('Pulseq protocol file not found.')
+            raise ValueError('Pulseq protocol file not found.')
 
-    prot_hdr = prot['hdr']
+    prot_hdr = ismrmrd.xsd.CreateFromDocument(prot.read_xml_header())
 
     #---------------------------
     # Process all acquisitions
     #---------------------------
 
-    prot_acq = prot['acquisitions']['%d' % acq_ctr]
-    acq.resize(trajectory_dimensions = prot_acq.attrs['trajectory_dimensions'], number_of_samples=acq.number_of_samples, active_channels=acq.active_channels)
+    prot_acq = prot.read_acquisition(acq_ctr)
 
     # rotation matrix
-    acq.phase_dir[:] = prot_acq['phase_dir']
-    acq.read_dir[:] = prot_acq['read_dir']
-    acq.slice_dir[:] = prot_acq['slice_dir']
+    acq.phase_dir[:] = prot_acq.phase_dir[:]
+    acq.read_dir[:] = prot_acq.read_dir[:]
+    acq.slice_dir[:] = prot_acq.slice_dir[:]
 
-    # flags - WIP: this is not the complete list of flags, if needed flags can be added
-    acq.clearAllFlags()
-    if prot_acq['flags'].attrs['ACQ_IS_NOISE_MEASUREMENT']:
+    # flags - WIP: this is not the complete list of flags - if needed, flags can be added
+    if prot_acq.is_flag_set(ismrmrd.ACQ_IS_NOISE_MEASUREMENT):
         acq.setFlag(ismrmrd.ACQ_IS_NOISE_MEASUREMENT)
-    if prot_acq['flags'].attrs['ACQ_IS_PHASECORR_DATA']:
+    if prot_acq.is_flag_set(ismrmrd.ACQ_IS_PHASECORR_DATA):
         acq.setFlag(ismrmrd.ACQ_IS_PHASECORR_DATA)
-    if prot_acq['flags'].attrs['ACQ_IS_DUMMYSCAN_DATA']:
+    if prot_acq.is_flag_set(ismrmrd.ACQ_IS_DUMMYSCAN_DATA):
         acq.setFlag(ismrmrd.ACQ_IS_DUMMYSCAN_DATA)
-    if prot_acq['flags'].attrs['ACQ_IS_PARALLEL_CALIBRATION']:
+    if prot_acq.is_flag_set(ismrmrd.ACQ_IS_PARALLEL_CALIBRATION):
         acq.setFlag(ismrmrd.ACQ_IS_PARALLEL_CALIBRATION)
-    if prot_acq['flags'].attrs['ACQ_LAST_IN_SLICE']:
+    if prot_acq.is_flag_set(ismrmrd.ACQ_LAST_IN_SLICE):
         acq.setFlag(ismrmrd.ACQ_LAST_IN_SLICE)
-    if prot_acq['flags'].attrs['ACQ_LAST_IN_REPETITION']:
-        acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION) 
+    if prot_acq.is_flag_set(ismrmrd.ACQ_LAST_IN_REPETITION):
+        acq.setFlag(ismrmrd.ACQ_LAST_IN_REPETITION)
 
     # encoding counters
-    acq.idx.kspace_encode_step_1 = prot_acq['idx'].attrs['kspace_encode_step_1']
-    acq.idx.kspace_encode_step_2 = prot_acq['idx'].attrs['kspace_encode_step_2']
-    acq.idx.slice = prot_acq['idx'].attrs['slice']
-    acq.idx.contrast = prot_acq['idx'].attrs['contrast']
-    acq.idx.phase = prot_acq['idx'].attrs['phase']
-    acq.idx.average = prot_acq['idx'].attrs['average']
-    acq.idx.repetition = prot_acq['idx'].attrs['repetition']
-    acq.idx.set = prot_acq['idx'].attrs['set']
-    acq.idx.segment = prot_acq['idx'].attrs['segment']
+    acq.idx.kspace_encode_step_1 = prot_acq.idx.kspace_encode_step_1
+    acq.idx.kspace_encode_step_2 = prot_acq.idx.kspace_encode_step_2
+    acq.idx.slice = prot_acq.idx.slice
+    acq.idx.contrast = prot_acq.idx.contrast
+    acq.idx.phase = prot_acq.idx.phase
+    acq.idx.average = prot_acq.idx.average
+    acq.idx.repetition = prot_acq.idx.repetition
+    acq.idx.set = prot_acq.idx.set
+    acq.idx.segment = prot_acq.idx.segment
 
     # calculate trajectory with GIRF prediction
-    traj = calc_traj(prot_acq, prot_hdr, acq.number_of_samples)
-    acq.traj[:] = np.swapaxes(traj,0,1) # [samples, dims]
+    acq.resize(trajectory_dimensions=prot_acq.trajectory_dimensions, number_of_samples=acq.number_of_samples, active_channels=acq.active_channels)
+    acq.traj[:] = calc_traj(prot_acq, prot_hdr, acq.number_of_samples) # [samples, dims]
 
     prot.close()
 
@@ -298,24 +293,22 @@ def calc_traj(acq, hdr, ncol):
         hdr: header from hdf5 protocol file
     """
     def calc_rotmat(acq):
-        phase_dir = acq['phase_dir'][:]
-        read_dir = acq['read_dir'][:]
-        slice_dir = acq['slice_dir'][:]
+        phase_dir = np.asarray(acq.phase_dir)
+        read_dir = np.asarray(acq.read_dir)
+        slice_dir = np.asarray(acq.slice_dir)
         return np.round(np.concatenate([phase_dir[:,np.newaxis], read_dir[:,np.newaxis], slice_dir[:,np.newaxis]], axis=1), 6)
 
     dt_grad = 10e-6 # [s]
     dt_skope = 1e-6 # [s]
     gammabar = 42.577e6
 
-    grad = acq['gradients'][:] # [dims, samples] [T/m]
+    grad = np.swapaxes(acq.traj[:],0,1) # [dims, samples] [T/m]
     dims = grad.shape[0]
-    if acq.attrs['trajectory_dimensions'] != dims:
-        print('Warning: Ismrmrd parameter trajectory_dimensions differs from gradient array dimensions.')
 
-    fov = hdr['encoding']['0']['reconSpace']['fieldOfView_mm'].attrs['x']
+    fov = hdr.encoding[0].reconSpace.fieldOfView_mm.x
     rotmat = calc_rotmat(acq)
-    dwelltime = 1e-6 * hdr['userParameters']['userParameterDouble'].attrs['dwellTime_us']
-    gradshift = hdr['userParameters']['userParameterDouble'].attrs['traj_delay']
+    dwelltime = 1e-6 * hdr.userParameters.userParameterDouble[0].value_
+    gradshift = hdr.userParameters.userParameterDouble[1].value_
 
     # ADC sampling time
     adctime = dwelltime * np.arange(0.5, ncol)
@@ -359,9 +352,9 @@ def calc_traj(acq, hdr, ncol):
     pred_trj = intp_axis(adctime, gradtime, pred_trj, axis=1)
     
     if dims == 2:
-        return pred_trj[:2]
+        return np.swapaxes(pred_trj[:2],0,1) # [samples, dims]
     else:
-        return pred_trj
+        return np.swapaxes(pred_trj,0,1) # [samples, dims]
 
 def grad_pred(grad, girf):
     """
